@@ -1,0 +1,212 @@
+ <!doctype html>
+ <html lang="en">
+ <head>
+   <meta charset="utf-8" />
+   <meta name="viewport" content="width=device-width, initial-scale=1" />
+   <title>Devanagari Character Classifier</title>
+   <style>
+     body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 24px; }
+     h1 { margin-top: 0; }
+     .row { display: flex; gap: 24px; flex-wrap: wrap; }
+     .card { border: 1px solid #ddd; border-radius: 8px; padding: 16px; width: 360px; }
+     canvas { border: 1px dashed #aaa; border-radius: 8px; cursor: crosshair; }
+     button { padding: 8px 12px; border-radius: 6px; border: 1px solid #444; background: #fff; cursor: pointer; }
+     button.primary { background: #5C0795; color: #fff; border: none; }
+     .muted { color: #666; }
+     .pred { font-size: 32px; }
+     .top5 { margin-top: 8px; }
+     .top5 div { display: flex; justify-content: space-between; }
+     input[type="file"] { display: block; margin-top: 8px; }
+   </style>
+ </head>
+ <body>
+   <h1>Devanagari Character Classifier</h1>
+   <p class="muted">Draw a character or upload a 32×32 grayscale image. The model predicts the most likely label.</p>
+ 
+   <div class="row">
+     <div class="card">
+       <h3>Draw</h3>
+       <canvas id="canvas" width="256" height="256"></canvas>
+       <div style="margin-top: 8px; display:flex; gap: 8px;">
+         <button id="clear">Clear</button>
+         <button id="predictCanvas" class="primary">Predict</button>
+       </div>
+     </div>
+ 
+     <div class="card">
+       <h3>Upload</h3>
+       <input type="file" id="file" accept="image/*" />
+       <div style="margin-top: 8px;">
+         <button id="predictFile" class="primary">Predict File</button>
+       </div>
+       <p class="muted">Any image will be converted to grayscale and resized to 32×32.</p>
+     </div>
+ 
+     <div class="card" style="flex:1; min-width: 280px;">
+       <h3>Result</h3>
+       <div id="result" class="pred">—</div>
+       <div id="prob" class="muted">—</div>
+       <div id="top5" class="top5"></div>
+     </div>
+   </div>
+
+   <div class="row" style="margin-top:24px;">
+     <div class="card" style="width: 480px;">
+       <h3>Word/Line OCR</h3>
+       <input type="file" id="fileText" accept="image/*" />
+       <div style="margin-top: 8px;">
+         <button id="predictText" class="primary">Predict Text</button>
+       </div>
+       <div style="margin-top: 12px;">
+         <div class="muted">Predicted Text:</div>
+         <div id="textOut" style="font-size: 24px; padding-top: 6px;">—</div>
+         <div style="margin-top: 8px; display:flex; gap:8px;">
+           <button id="downloadDocx">Download DOCX</button>
+         </div>
+       </div>
+     </div>
+   </div>
+ 
+   <script>
+     const canvas = document.getElementById('canvas');
+     const ctx = canvas.getContext('2d');
+     const clearBtn = document.getElementById('clear');
+     const predictCanvasBtn = document.getElementById('predictCanvas');
+     const predictFileBtn = document.getElementById('predictFile');
+     const predictTextBtn = document.getElementById('predictText');
+     const fileInput = document.getElementById('file');
+     const fileTextInput = document.getElementById('fileText');
+     const resultEl = document.getElementById('result');
+     const probEl = document.getElementById('prob');
+     const top5El = document.getElementById('top5');
+     const textOutEl = document.getElementById('textOut');
+     const downloadDocxBtn = document.getElementById('downloadDocx');
+ 
+     // Initialize white background so empty areas become white, strokes black
+     ctx.fillStyle = '#ffffff';
+     ctx.fillRect(0, 0, canvas.width, canvas.height);
+ 
+     let drawing = false;
+     let last = null;
+ 
+     function getPos(e) {
+       const rect = canvas.getBoundingClientRect();
+       const x = (e.touches ? e.touches[0].clientX : e.clientX) - rect.left;
+       const y = (e.touches ? e.touches[0].clientY : e.clientY) - rect.top;
+       return { x, y };
+     }
+ 
+     function start(e) { drawing = true; last = getPos(e); }
+     function stop() { drawing = false; last = null; }
+     function move(e) {
+       if (!drawing) return;
+       const p = getPos(e);
+       ctx.strokeStyle = '#000000';
+       ctx.lineWidth = 16;
+       ctx.lineCap = 'round';
+       ctx.beginPath();
+       ctx.moveTo(last.x, last.y);
+       ctx.lineTo(p.x, p.y);
+       ctx.stroke();
+       last = p;
+     }
+ 
+     canvas.addEventListener('mousedown', start);
+     canvas.addEventListener('mousemove', move);
+     window.addEventListener('mouseup', stop);
+     canvas.addEventListener('touchstart', (e) => { e.preventDefault(); start(e); });
+     canvas.addEventListener('touchmove', (e) => { e.preventDefault(); move(e); });
+     canvas.addEventListener('touchend', (e) => { e.preventDefault(); stop(e); });
+ 
+     clearBtn.addEventListener('click', () => {
+       ctx.fillStyle = '#ffffff';
+       ctx.fillRect(0, 0, canvas.width, canvas.height);
+       resultEl.textContent = '—';
+       probEl.textContent = '—';
+       top5El.innerHTML = '';
+     });
+ 
+     async function callPredictWithBase64(dataUrl) {
+       const form = new FormData();
+       form.append('image_base64', dataUrl);
+       const res = await fetch('/predict', { method: 'POST', body: form });
+       return res.json();
+     }
+ 
+     predictCanvasBtn.addEventListener('click', async () => {
+       // Downscale to 32x32 grayscale server-side, but send as data URL (PNG)
+       const dataUrl = canvas.toDataURL('image/png');
+       const out = await callPredictWithBase64(dataUrl);
+       renderResult(out);
+     });
+ 
+     predictFileBtn.addEventListener('click', async () => {
+       if (!fileInput.files || !fileInput.files[0]) {
+         alert('Choose an image first.');
+         return;
+       }
+       const form = new FormData();
+       form.append('file', fileInput.files[0]);
+       const res = await fetch('/predict', { method: 'POST', body: form });
+       const out = await res.json();
+       renderResult(out);
+     });
+ 
+     function renderResult(out) {
+       if (out.error) {
+         resultEl.textContent = 'Error';
+         probEl.textContent = out.error;
+         top5El.innerHTML = '';
+         return;
+       }
+       resultEl.textContent = out.prediction;
+       probEl.textContent = `Confidence: ${(out.probability * 100).toFixed(1)}%`;
+       top5El.innerHTML = '';
+       (out.top5 || []).forEach(r => {
+         const row = document.createElement('div');
+         row.innerHTML = `<span>${r.label}</span><span>${(r.probability * 100).toFixed(1)}%</span>`;
+         top5El.appendChild(row);
+       });
+     }
+
+     // Predict word/line text
+     predictTextBtn.addEventListener('click', async () => {
+       if (!fileTextInput.files || !fileTextInput.files[0]) {
+         alert('Choose a word/line image first.');
+         return;
+       }
+       const form = new FormData();
+       form.append('file', fileTextInput.files[0]);
+       const res = await fetch('/predict_text', { method: 'POST', body: form });
+       const out = await res.json();
+       if (out.error) {
+         textOutEl.textContent = out.error;
+       } else {
+         textOutEl.textContent = out.text || '—';
+       }
+     });
+
+     // Download predicted text as DOCX
+     downloadDocxBtn.addEventListener('click', async () => {
+       const text = textOutEl.textContent.trim();
+       if (!text || text === '—') {
+         alert('No text to download. Predict text first.');
+         return;
+       }
+       const form = new FormData();
+       form.append('text', text);
+       const res = await fetch('/text_to_docx', { method: 'POST', body: form });
+       const blob = await res.blob();
+       const url = URL.createObjectURL(blob);
+       const a = document.createElement('a');
+       a.href = url;
+       a.download = 'prediction.docx';
+       document.body.appendChild(a);
+       a.click();
+       a.remove();
+       URL.revokeObjectURL(url);
+     });
+   </script>
+ </body>
+ </html>
+
